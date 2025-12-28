@@ -1,0 +1,26 @@
+{
+  "capture": {
+    "interface": "wlan1",
+    "channels": [1, 6, 11],
+    "hop_interval_ms": 250,
+    "database": "./prowl.db"
+  },
+  "gps": {
+    "enabled": true,
+    "host": "localhost",
+    "port": 2947
+  },
+  "analysis": {
+    "time_windows_minutes": [5, 10, 15, 20],
+    "persistence_threshold": 0.7
+  },
+  "ignore_lists": {
+    "mac": "ignore_lists/mac_list.json",
+    "ssid": "ignore_lists/ssid_list.json"
+  },
+  "distance": {
+    "enabled": true,
+    "tx_power_dbm": -45.0,
+    "path_loss_exponent": 3.0
+  }
+}

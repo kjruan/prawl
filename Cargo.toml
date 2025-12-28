@@ -1,0 +1,52 @@
+[package]
+name = "prowl"
+version = "0.1.0"
+edition = "2021"
+authors = ["spikehead"]
+description = "Wi-Fi probe request analyzer for surveillance detection"
+license = "MIT"
+
+[dependencies]
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+
+# 802.11 parsing
+libwifi = "0.4"
+
+# Packet capture
+pcap = "2.0"
+
+# GPS
+gpsd_proto = "1.0"
+
+# Ctrl+C handling
+ctrlc = { version = "3.4", features = ["termination"] }
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Async (for GPS polling)
+tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
+
+# MAC address handling
+macaddr = { version = "1.0", features = ["serde"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
