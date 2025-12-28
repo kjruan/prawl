@@ -21,6 +21,14 @@ impl ChannelHopper {
         }
     }
 
+    pub fn channels(&self) -> &[u8] {
+        &self.channels
+    }
+
+    pub fn hop_interval_ms(&self) -> u64 {
+        self.hop_interval_ms
+    }
+
     pub async fn run(&self, running: Arc<AtomicBool>) -> Result<()> {
         if self.channels.is_empty() {
             warn!("No channels configured, using default 2.4GHz channels");
@@ -116,6 +124,71 @@ pub fn is_monitor_mode(interface: &str) -> Result<bool> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     Ok(stdout.contains("type monitor"))
+}
+
+/// Find the first wireless interface in monitor mode
+pub fn find_monitor_interface() -> Result<Option<String>> {
+    let output = Command::new("iw")
+        .args(["dev"])
+        .output()
+        .context("Failed to list wireless devices")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Parse iw dev output to find interfaces
+    let mut current_interface: Option<String> = None;
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.starts_with("Interface ") {
+            current_interface = Some(line.strip_prefix("Interface ").unwrap_or("").to_string());
+        } else if line.starts_with("type ") && line.contains("monitor") {
+            if let Some(iface) = current_interface.take() {
+                info!("Found monitor mode interface: {}", iface);
+                return Ok(Some(iface));
+            }
+        } else if line.starts_with("Interface ") {
+            // Reset for next interface
+            current_interface = Some(line.strip_prefix("Interface ").unwrap_or("").to_string());
+        }
+    }
+
+    Ok(None)
+}
+
+/// List all wireless interfaces with their modes
+pub fn list_wireless_interfaces() -> Result<Vec<(String, String)>> {
+    let output = Command::new("iw")
+        .args(["dev"])
+        .output()
+        .context("Failed to list wireless devices")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let mut interfaces = Vec::new();
+    let mut current_interface: Option<String> = None;
+    let mut current_type = String::from("unknown");
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.starts_with("Interface ") {
+            // Save previous interface if exists
+            if let Some(iface) = current_interface.take() {
+                interfaces.push((iface, current_type.clone()));
+            }
+            current_interface = Some(line.strip_prefix("Interface ").unwrap_or("").to_string());
+            current_type = String::from("unknown");
+        } else if line.starts_with("type ") {
+            current_type = line.strip_prefix("type ").unwrap_or("unknown").to_string();
+        }
+    }
+
+    // Don't forget the last interface
+    if let Some(iface) = current_interface {
+        interfaces.push((iface, current_type));
+    }
+
+    Ok(interfaces)
 }
 
 /// Get list of available 2.4GHz channels

@@ -1,5 +1,5 @@
 use crate::analysis::SurveillanceAlert;
-use crate::database::{Database, Device};
+use crate::database::Database;
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 use std::fs::File;

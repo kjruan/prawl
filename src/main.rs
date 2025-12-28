@@ -3,11 +3,12 @@ use clap::{Parser, Subcommand};
 use log::{error, info, LevelFilter};
 use prowl::analysis::SurveillanceAnalyzer;
 use prowl::capture::CaptureEngine;
-use prowl::channels::{is_monitor_mode, set_monitor_mode};
+use prowl::channels::{find_monitor_interface, is_monitor_mode, list_wireless_interfaces, set_monitor_mode};
 use prowl::config::Config;
 use prowl::database::Database;
 use prowl::ignore::{create_default_ignore_lists, IgnoreLists};
 use prowl::report::ReportGenerator;
+use prowl::tui;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -91,6 +92,16 @@ enum Commands {
         #[command(subcommand)]
         action: DbCommands,
     },
+
+    /// Start interactive TUI dashboard with live capture
+    Tui {
+        /// Set interface to monitor mode before capture
+        #[arg(long)]
+        set_monitor: bool,
+    },
+
+    /// Scan for wireless interfaces
+    Scan,
 }
 
 #[derive(Subcommand)]
@@ -182,22 +193,77 @@ async fn main() -> Result<()> {
         Commands::Db { action } => {
             handle_db(config, action)
         }
+        Commands::Tui { set_monitor } => {
+            tui::run_tui(config, set_monitor).await
+        }
+        Commands::Scan => {
+            handle_scan()
+        }
     }
 }
 
-async fn handle_capture(config: Config, set_monitor: bool) -> Result<()> {
-    let interface = &config.capture.interface;
+fn handle_scan() -> Result<()> {
+    println!("Scanning for wireless interfaces...\n");
 
-    // Check/set monitor mode
-    if set_monitor {
-        set_monitor_mode(interface)?;
-    } else if !is_monitor_mode(interface)? {
-        error!(
-            "Interface {} is not in monitor mode. Use --set-monitor or set manually.",
-            interface
-        );
+    let interfaces = list_wireless_interfaces()?;
+
+    if interfaces.is_empty() {
+        println!("No wireless interfaces found.");
+        println!("\nMake sure you have a wireless adapter connected.");
         return Ok(());
     }
+
+    let mut found_monitor = false;
+
+    for (iface, mode) in &interfaces {
+        if mode == "monitor" {
+            println!("\x1b[32m[MONITOR]\x1b[0m {}", iface);
+            found_monitor = true;
+        } else {
+            println!("\x1b[33m[{}]\x1b[0m {}", mode, iface);
+        }
+    }
+
+    println!();
+
+    if found_monitor {
+        if let Ok(Some(iface)) = find_monitor_interface() {
+            println!("\x1b[32mMonitor interface found: {}\x1b[0m", iface);
+            println!("\nStart capturing with:");
+            println!("  sudo prowl capture");
+            println!("  sudo prowl tui");
+        }
+    } else {
+        println!("\x1b[33mNo monitor mode interfaces found.\x1b[0m");
+        println!("\nTo enable monitor mode:");
+        println!("  sudo prowl capture --set-monitor");
+        println!("  sudo prowl tui --set-monitor");
+    }
+
+    Ok(())
+}
+
+async fn handle_capture(mut config: Config, set_monitor: bool) -> Result<()> {
+    // Try to auto-detect monitor interface if configured one isn't in monitor mode
+    let interface = if set_monitor {
+        set_monitor_mode(&config.capture.interface)?;
+        config.capture.interface.clone()
+    } else if is_monitor_mode(&config.capture.interface)? {
+        config.capture.interface.clone()
+    } else if let Some(found) = find_monitor_interface()? {
+        info!("Auto-detected monitor interface: {}", found);
+        config.capture.interface = found.clone();
+        found
+    } else {
+        error!(
+            "Interface {} is not in monitor mode and no monitor interface found.",
+            config.capture.interface
+        );
+        error!("Use --set-monitor or run 'prowl scan' to find interfaces.");
+        return Ok(());
+    };
+
+    info!("Using interface: {}", interface);
 
     // Open database
     let db = Database::open(&config.capture.database)
@@ -223,7 +289,10 @@ async fn handle_capture(config: Config, set_monitor: bool) -> Result<()> {
     let engine = CaptureEngine::new(config.clone(), db, ignore_lists, running);
 
     // Run capture
-    let _ = engine.run().await;
+    if let Err(e) = engine.run().await {
+        error!("Capture failed: {}", e);
+        std::process::exit(1);
+    }
 
     // Force exit to ensure all threads terminate
     info!("Exiting...");

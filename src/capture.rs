@@ -45,13 +45,21 @@ impl CaptureEngine {
         info!("Starting capture on interface: {}", interface);
 
         // Open capture handle
-        let mut cap = Capture::from_device(interface.as_str())
-            .context("Failed to open capture device")?
-            .promisc(true)
-            .snaplen(65535)
-            .timeout(1000)
-            .open()
-            .context("Failed to activate capture")?;
+        debug!("Opening pcap capture on {}...", interface);
+        let cap_builder = Capture::from_device(interface.as_str())
+            .context("Failed to open capture device")?;
+        debug!("Setting promiscuous mode...");
+        let cap_builder = cap_builder.promisc(true).snaplen(65535).timeout(1000);
+        debug!("Activating capture...");
+        let mut cap = match cap_builder.open() {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Failed to activate capture: {}", e);
+                error!("Make sure you're running as root (sudo) and the interface exists");
+                return Err(anyhow::anyhow!("Failed to activate capture: {}", e));
+            }
+        };
+        debug!("Capture handle opened successfully");
 
         // Set to monitor mode filter for probe requests
         // BPF filter for management frames type 0 subtype 4 (probe request)
@@ -92,7 +100,7 @@ impl CaptureEngine {
 
         let mut gps_position: Option<(f64, f64)> = None;
         let mut gps_rx = gps_rx;
-        let mut current_channel: Option<u8> = None;
+        let current_channel: Option<u8> = None;
         let mut packet_count = 0u64;
         let mut probe_count = 0u64;
 

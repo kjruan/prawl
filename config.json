@@ -1,6 +1,6 @@
 {
   "capture": {
-    "interface": "wlan1",
+    "interface": "wlan0",
     "channels": [1, 6, 11],
     "hop_interval_ms": 250,
     "database": "./prowl.db"

@@ -1,8 +1,8 @@
 use crate::database::{Database, Device, Probe};
 use anyhow::Result;
-use chrono::{DateTime, TimeZone, Utc};
-use log::{debug, info, warn};
-use std::collections::{HashMap, HashSet};
+use chrono::{TimeZone, Utc};
+use log::info;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
 pub struct SurveillanceAlert {
@@ -103,7 +103,7 @@ impl SurveillanceAnalyzer {
         score.min(1.0)
     }
 
-    fn calculate_window_coverage(&self, probes: &[Probe], start: i64, end: i64) -> f64 {
+    fn calculate_window_coverage(&self, probes: &[Probe], _start: i64, end: i64) -> f64 {
         if self.time_windows_minutes.is_empty() {
             return 0.0;
         }
