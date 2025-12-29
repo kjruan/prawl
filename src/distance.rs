@@ -7,7 +7,7 @@
 /// - tx_power: Reference signal strength at 1 meter (dBm)
 /// - rssi: Measured signal strength (dBm)
 /// - n: Path loss exponent (environment dependent)
-
+///
 /// Estimate distance in meters from RSSI
 ///
 /// # Arguments
@@ -51,18 +51,16 @@ pub fn distance_category(distance_m: f64) -> &'static str {
 /// Get a threat level indicator based on distance
 pub fn distance_threat_indicator(distance_m: f64) -> &'static str {
     match distance_m {
-        d if d < 3.0 => "🔴",   // Very close - high concern
-        d if d < 10.0 => "🟠",  // Close - moderate concern
-        d if d < 20.0 => "🟡",  // Nearby - low concern
-        _ => "🟢",              // Far - minimal concern
+        d if d < 3.0 => "🔴",  // Very close - high concern
+        d if d < 10.0 => "🟠", // Close - moderate concern
+        d if d < 20.0 => "🟡", // Nearby - low concern
+        _ => "🟢",             // Far - minimal concern
     }
 }
 
 /// Format distance for display
 pub fn format_distance(distance_m: f64) -> String {
-    if distance_m < 1.0 {
-        format!("{:.1}m", distance_m)
-    } else if distance_m < 10.0 {
+    if distance_m < 10.0 {
         format!("{:.1}m", distance_m)
     } else {
         format!("{:.0}m", distance_m)

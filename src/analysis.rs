@@ -67,7 +67,11 @@ impl SurveillanceAnalyzer {
         }
 
         // Sort by score descending
-        alerts.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        alerts.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         info!("Found {} potential surveillance devices", alerts.len());
         Ok(alerts)
@@ -139,13 +143,11 @@ impl SurveillanceAnalyzer {
         // Count unique locations (rounded to ~100m precision)
         let locations: HashSet<(i64, i64)> = probes
             .iter()
-            .filter_map(|p| {
-                match (p.lat, p.lon) {
-                    (Some(lat), Some(lon)) if lat != 0.0 || lon != 0.0 => {
-                        Some(((lat * 1000.0) as i64, (lon * 1000.0) as i64))
-                    }
-                    _ => None,
+            .filter_map(|p| match (p.lat, p.lon) {
+                (Some(lat), Some(lon)) if lat != 0.0 || lon != 0.0 => {
+                    Some(((lat * 1000.0) as i64, (lon * 1000.0) as i64))
                 }
+                _ => None,
             })
             .collect();
 
@@ -155,18 +157,15 @@ impl SurveillanceAnalyzer {
 
         // More locations = higher suspicion (following behavior)
         // 1 location = 0.2, 3+ locations = 1.0
-        ((locations.len() as f64 - 1.0) / 2.0).min(1.0).max(0.2)
+        ((locations.len() as f64 - 1.0) / 2.0).clamp(0.2, 1.0)
     }
 
     fn get_alert_reasons(&self, device: &Device, probes: &[Probe], score: f64) -> Vec<String> {
         let mut reasons = Vec::new();
 
         // Check for persistence across multiple time windows
-        let window_coverage = self.calculate_window_coverage(
-            probes,
-            device.first_seen,
-            device.last_seen,
-        );
+        let window_coverage =
+            self.calculate_window_coverage(probes, device.first_seen, device.last_seen);
         if window_coverage >= 0.75 {
             reasons.push("Present across multiple time windows".to_string());
         }
@@ -181,13 +180,11 @@ impl SurveillanceAnalyzer {
         // Check for multiple locations
         let locations: HashSet<(i64, i64)> = probes
             .iter()
-            .filter_map(|p| {
-                match (p.lat, p.lon) {
-                    (Some(lat), Some(lon)) if lat != 0.0 || lon != 0.0 => {
-                        Some(((lat * 1000.0) as i64, (lon * 1000.0) as i64))
-                    }
-                    _ => None,
+            .filter_map(|p| match (p.lat, p.lon) {
+                (Some(lat), Some(lon)) if lat != 0.0 || lon != 0.0 => {
+                    Some(((lat * 1000.0) as i64, (lon * 1000.0) as i64))
                 }
+                _ => None,
             })
             .collect();
 
@@ -233,10 +230,7 @@ pub struct TimeWindowAnalysis {
     pub devices: Vec<String>, // MAC addresses
 }
 
-pub fn analyze_time_windows(
-    db: &Database,
-    windows: &[u32],
-) -> Result<Vec<TimeWindowAnalysis>> {
+pub fn analyze_time_windows(db: &Database, windows: &[u32]) -> Result<Vec<TimeWindowAnalysis>> {
     let now = chrono::Utc::now().timestamp();
     let mut results = Vec::new();
 

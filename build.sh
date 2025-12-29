@@ -16,6 +16,24 @@ if ! command -v cargo &> /dev/null; then
     exit 1
 fi
 
+# Helper to install cargo-zigbuild if needed
+install_zigbuild() {
+    if ! command -v cargo-zigbuild &>/dev/null; then
+        echo -e "${YELLOW}Installing cargo-zigbuild for cross-compilation...${NC}"
+        cargo install cargo-zigbuild
+    fi
+
+    if ! command -v zig &>/dev/null; then
+        echo ""
+        echo -e "${RED}ERROR: zig is required for cross-compilation${NC}"
+        echo "Install with your package manager:"
+        echo "  Arch:   sudo pacman -S zig"
+        echo "  Ubuntu: sudo snap install zig --classic"
+        echo "  macOS:  brew install zig"
+        exit 1
+    fi
+}
+
 # Parse arguments
 RELEASE=false
 INSTALL=false
@@ -24,6 +42,7 @@ CAPS=false
 TARGET=""
 RPI_32=false
 RPI_64=false
+USE_ZIGBUILD=false
 
 for arg in "$@"; do
     case $arg in
@@ -40,11 +59,13 @@ for arg in "$@"; do
         --rpi|--rpi32|--pi)
             RPI_32=true
             RELEASE=true
+            USE_ZIGBUILD=true
             TARGET="armv7-unknown-linux-gnueabihf"
             ;;
         --rpi64|--pi64)
             RPI_64=true
             RELEASE=true
+            USE_ZIGBUILD=true
             TARGET="aarch64-unknown-linux-gnu"
             ;;
         --caps)
@@ -67,14 +88,9 @@ for arg in "$@"; do
             echo "  --caps             Install with capabilities (run without sudo)"
             echo "  -h, --help         Show this help message"
             echo ""
-            echo "Cross-compilation setup (run once):"
-            echo "  # For 32-bit Pi (Pi 2/3/4 with 32-bit OS):"
-            echo "  rustup target add armv7-unknown-linux-gnueabihf"
-            echo "  sudo pacman -S arm-none-eabi-gcc  # or: apt install gcc-arm-linux-gnueabihf"
-            echo ""
-            echo "  # For 64-bit Pi (Pi 3/4/5 with 64-bit OS):"
-            echo "  rustup target add aarch64-unknown-linux-gnu"
-            echo "  sudo pacman -S aarch64-linux-gnu-gcc  # or: apt install gcc-aarch64-linux-gnu"
+            echo "Cross-compilation requirements:"
+            echo "  sudo pacman -S zig    # Arch"
+            echo "  cargo install cargo-zigbuild"
             exit 0
             ;;
         *)
@@ -87,35 +103,12 @@ done
 # Setup cross-compilation if targeting Raspberry Pi
 if [ -n "$TARGET" ]; then
     echo -e "${CYAN}Target: ${TARGET}${NC}"
+    install_zigbuild
 
     # Check if target is installed
     if ! rustup target list --installed | grep -q "$TARGET"; then
         echo -e "${YELLOW}Installing Rust target: ${TARGET}${NC}"
         rustup target add "$TARGET"
-    fi
-
-    # Set linker based on target
-    if [ "$RPI_32" = true ]; then
-        # Check for cross-compiler
-        if command -v arm-linux-gnueabihf-gcc &> /dev/null; then
-            export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc
-        elif command -v armv7-unknown-linux-gnueabihf-gcc &> /dev/null; then
-            export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=armv7-unknown-linux-gnueabihf-gcc
-        else
-            echo -e "${RED}Error: ARM cross-compiler not found.${NC}"
-            echo -e "Install with: sudo pacman -S arm-none-eabi-gcc"
-            echo -e "         or: sudo apt install gcc-arm-linux-gnueabihf"
-            exit 1
-        fi
-    elif [ "$RPI_64" = true ]; then
-        if command -v aarch64-linux-gnu-gcc &> /dev/null; then
-            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-        else
-            echo -e "${RED}Error: AArch64 cross-compiler not found.${NC}"
-            echo -e "Install with: sudo pacman -S aarch64-linux-gnu-gcc"
-            echo -e "         or: sudo apt install gcc-aarch64-linux-gnu"
-            exit 1
-        fi
     fi
 fi
 
@@ -127,8 +120,8 @@ fi
 
 # Build
 if [ -n "$TARGET" ]; then
-    echo -e "${YELLOW}Building release binary for ${TARGET}...${NC}"
-    cargo build --release --target "$TARGET"
+    echo -e "${YELLOW}Building release binary for ${TARGET} (using zigbuild)...${NC}"
+    cargo zigbuild --release --target "$TARGET"
     BINARY="target/${TARGET}/release/prowl"
 elif [ "$RELEASE" = true ]; then
     echo -e "${YELLOW}Building release binary...${NC}"

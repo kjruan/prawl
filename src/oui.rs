@@ -1,8 +1,8 @@
 //! OUI (Organizationally Unique Identifier) lookup for MAC address vendor identification
 //! and MAC randomization detection.
 
-use std::collections::HashMap;
 use once_cell::sync::Lazy;
+use std::collections::HashMap;
 
 /// Common OUI prefixes mapped to vendor names
 /// This is a subset of the IEEE OUI database for common device manufacturers
@@ -382,7 +382,8 @@ pub fn is_randomized_mac(mac: &str) -> bool {
 pub fn lookup_vendor(mac: &str) -> Option<&'static str> {
     // Normalize MAC format to XX:XX:XX
     let mac_upper = mac.to_uppercase();
-    let parts: Vec<&str> = mac_upper.split(|c| c == ':' || c == '-' || c == '.').collect();
+    let parts: Vec<&str> = mac_upper.split(['.', '-', '.']).collect();
+    // let parts: Vec<&str> = mac_upper.split(|c| c == ':' || c == '-' || c == '.').collect();
 
     if parts.len() < 3 {
         return None;
@@ -425,8 +426,8 @@ pub fn infer_device_type(mac: &str, vendor: Option<&str>) -> &'static str {
     }
 
     match vendor {
-        Some("Apple") | Some("Samsung") | Some("Huawei") |
-        Some("Xiaomi") | Some("OnePlus") | Some("Google") => "Phone/Tablet",
+        Some("Apple") | Some("Samsung") | Some("Huawei") | Some("Xiaomi") | Some("OnePlus")
+        | Some("Google") => "Phone/Tablet",
         Some("Intel") | Some("Microsoft") => "Laptop/PC",
         Some("Espressif") | Some("Raspberry Pi") => "IoT",
         Some("Amazon") => "Echo/Fire",

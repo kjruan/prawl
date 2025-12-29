@@ -62,7 +62,13 @@ impl ChannelHopper {
     fn set_channel(&self, channel: u8) -> Result<()> {
         // Use iw to set channel
         let output = Command::new("iw")
-            .args(["dev", &self.interface, "set", "channel", &channel.to_string()])
+            .args([
+                "dev",
+                &self.interface,
+                "set",
+                "channel",
+                &channel.to_string(),
+            ])
             .output()
             .context("Failed to execute iw command")?;
 
@@ -147,9 +153,6 @@ pub fn find_monitor_interface() -> Result<Option<String>> {
                 info!("Found monitor mode interface: {}", iface);
                 return Ok(Some(iface));
             }
-        } else if line.starts_with("Interface ") {
-            // Reset for next interface
-            current_interface = Some(line.strip_prefix("Interface ").unwrap_or("").to_string());
         }
     }
 

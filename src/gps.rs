@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use log::{debug, info, warn};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
+use std::ops::RangeInclusive;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,11 +28,7 @@ impl GpsClient {
         GpsClient { host, port }
     }
 
-    pub async fn run(
-        &self,
-        tx: mpsc::Sender<(f64, f64)>,
-        running: Arc<AtomicBool>,
-    ) -> Result<()> {
+    pub async fn run(&self, tx: mpsc::Sender<(f64, f64)>, running: Arc<AtomicBool>) -> Result<()> {
         info!("Connecting to gpsd at {}:{}", self.host, self.port);
 
         loop {
@@ -58,8 +55,7 @@ impl GpsClient {
         running: &Arc<AtomicBool>,
     ) -> Result<()> {
         let addr = format!("{}:{}", self.host, self.port);
-        let mut stream = TcpStream::connect(&addr)
-            .context("Failed to connect to gpsd")?;
+        let mut stream = TcpStream::connect(&addr).context("Failed to connect to gpsd")?;
 
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -113,7 +109,9 @@ fn parse_gpsd_json(json: &str) -> Option<GpsPosition> {
     let lon = extract_number(json, "\"lon\":")?;
 
     // Validate coordinates
-    if lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0 {
+    if !RangeInclusive::new(-90.0, 90.0).contains(&lat)
+        || !RangeInclusive::new(-180.0, 180.0).contains(&lon)
+    {
         return None;
     }
 
@@ -140,7 +138,8 @@ fn extract_number(json: &str, key: &str) -> Option<f64> {
 
     // Find end of number (comma, }, or end of string)
     let end = rest
-        .find(|c: char| c == ',' || c == '}' || c == ' ')
+        .find(['.', '}', ' '])
+        // .find(|c: char| c == ',' || c == '}' || c == ' ')
         .unwrap_or(rest.len());
 
     rest[..end].trim().parse().ok()
