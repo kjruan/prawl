@@ -36,10 +36,24 @@ impl GpsClient {
                 break;
             }
 
-            match self.connect_and_read(&tx, &running) {
-                Ok(_) => {}
-                Err(e) => {
+            let host = self.host.clone();
+            let port = self.port;
+            let tx_clone = tx.clone();
+            let running_clone = running.clone();
+
+            let result = tokio::task::spawn_blocking(move || {
+                connect_and_read(&host, port, &tx_clone, &running_clone)
+            })
+            .await;
+
+            match result {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
                     warn!("GPS connection error: {}, retrying in 5s", e);
+                    sleep(Duration::from_secs(5)).await;
+                }
+                Err(e) => {
+                    warn!("GPS task error: {}, retrying in 5s", e);
                     sleep(Duration::from_secs(5)).await;
                 }
             }
@@ -48,53 +62,54 @@ impl GpsClient {
         info!("GPS client stopped");
         Ok(())
     }
+}
 
-    fn connect_and_read(
-        &self,
-        tx: &mpsc::Sender<(f64, f64)>,
-        running: &Arc<AtomicBool>,
-    ) -> Result<()> {
-        let addr = format!("{}:{}", self.host, self.port);
-        let mut stream = TcpStream::connect(&addr).context("Failed to connect to gpsd")?;
+fn connect_and_read(
+    host: &str,
+    port: u16,
+    tx: &mpsc::Sender<(f64, f64)>,
+    running: &Arc<AtomicBool>,
+) -> Result<()> {
+    let addr = format!("{}:{}", host, port);
+    let mut stream = TcpStream::connect(&addr).context("Failed to connect to gpsd")?;
 
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
 
-        // Enable JSON watch mode
-        stream.write_all(b"?WATCH={\"enable\":true,\"json\":true}\n")?;
-        stream.flush()?;
+    // Enable JSON watch mode
+    stream.write_all(b"?WATCH={\"enable\":true,\"json\":true}\n")?;
+    stream.flush()?;
 
-        info!("Connected to gpsd, waiting for position data");
+    info!("Connected to gpsd, waiting for position data");
 
-        let reader = BufReader::new(stream);
+    let reader = BufReader::new(stream);
 
-        for line in reader.lines() {
-            if !running.load(Ordering::SeqCst) {
-                break;
-            }
-
-            match line {
-                Ok(json) => {
-                    if let Some(pos) = parse_gpsd_json(&json) {
-                        debug!("GPS: lat={}, lon={}", pos.lat, pos.lon);
-                        if tx.blocking_send((pos.lat, pos.lon)).is_err() {
-                            break;
-                        }
-                    }
-                }
-                Err(e) => {
-                    if e.kind() == std::io::ErrorKind::WouldBlock
-                        || e.kind() == std::io::ErrorKind::TimedOut
-                    {
-                        continue;
-                    }
-                    return Err(e.into());
-                }
-            }
+    for line in reader.lines() {
+        if !running.load(Ordering::SeqCst) {
+            break;
         }
 
-        Ok(())
+        match line {
+            Ok(json) => {
+                if let Some(pos) = parse_gpsd_json(&json) {
+                    debug!("GPS: lat={}, lon={}", pos.lat, pos.lon);
+                    if tx.blocking_send((pos.lat, pos.lon)).is_err() {
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut
+                {
+                    continue;
+                }
+                return Err(e.into());
+            }
+        }
     }
+
+    Ok(())
 }
 
 fn parse_gpsd_json(json: &str) -> Option<GpsPosition> {
