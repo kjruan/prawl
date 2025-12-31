@@ -1,6 +1,6 @@
 {
   "capture": {
-    "interface": "wlan0",
+    "interface": "wlan1",
     "channels": [1, 6, 11],
     "hop_interval_ms": 250,
     "database": "./prowl.db"
@@ -20,7 +20,7 @@
   },
   "distance": {
     "enabled": true,
-    "tx_power_dbm": -45.0,
+    "tx_power_dbm": -30.0,
     "path_loss_exponent": 3.0
   }
 }

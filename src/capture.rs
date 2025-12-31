@@ -203,7 +203,6 @@ impl CaptureEngine {
 }
 
 fn extract_signal_dbm(data: &[u8]) -> Option<i32> {
-    // Check for radiotap header
     if data.len() < 8 || data[0] != 0 {
         return None;
     }
@@ -213,46 +212,58 @@ fn extract_signal_dbm(data: &[u8]) -> Option<i32> {
         return None;
     }
 
-    // Present flags are at bytes 4-7 (can extend further)
-    let present = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+    // Collect all present bitmasks (handle extended flags - bit 31)
+    let mut present_words: Vec<u32> = Vec::new();
+    let mut pos = 4;
+    loop {
+        if pos + 4 > data.len() {
+            return None;
+        }
+        let present = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        present_words.push(present);
+        pos += 4;
+        if present & (1 << 31) == 0 {
+            break;
+        }
+    }
 
-    // Radiotap field order is fixed. We need to count bytes to find signal.
-    // Bit 5 = DBM Antenna Signal
-    if present & (1 << 5) == 0 {
+    let first_present = present_words[0];
+
+    // Check if DBM Antenna Signal (bit 5) is present
+    if first_present & (1 << 5) == 0 {
         return None;
     }
 
-    // Count bytes before signal field
-    let mut offset = 8;
+    let mut offset = pos; // Start after all present words
 
-    // TSFT (bit 0) - 8 bytes, aligned to 8
-    if present & (1 << 0) != 0 {
-        offset = (offset + 7) & !7; // align to 8
+    // Bit 0: TSFT - 8 bytes, requires 8-byte alignment
+    if first_present & (1 << 0) != 0 {
+        offset = (offset + 7) & !7;
         offset += 8;
     }
 
-    // Flags (bit 1) - 1 byte
-    if present & (1 << 1) != 0 {
+    // Bit 1: Flags - 1 byte
+    if first_present & (1 << 1) != 0 {
         offset += 1;
     }
 
-    // Rate (bit 2) - 1 byte
-    if present & (1 << 2) != 0 {
+    // Bit 2: Rate - 1 byte
+    if first_present & (1 << 2) != 0 {
         offset += 1;
     }
 
-    // Channel (bit 3) - 4 bytes, aligned to 2
-    if present & (1 << 3) != 0 {
-        offset = (offset + 1) & !1; // align to 2
+    // Bit 3: Channel - 4 bytes, requires 2-byte alignment
+    if first_present & (1 << 3) != 0 {
+        offset = (offset + 1) & !1;
         offset += 4;
     }
 
-    // FHSS (bit 4) - 2 bytes
-    if present & (1 << 4) != 0 {
+    // Bit 4: FHSS - 2 bytes
+    if first_present & (1 << 4) != 0 {
         offset += 2;
     }
 
-    // Now we're at DBM Antenna Signal (bit 5) - 1 byte, signed
+    // Bit 5: DBM Antenna Signal - 1 byte signed
     if offset < radiotap_len {
         let signal = data[offset] as i8;
         return Some(signal as i32);

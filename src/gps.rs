@@ -153,8 +153,7 @@ fn extract_number(json: &str, key: &str) -> Option<f64> {
 
     // Find end of number (comma, }, or end of string)
     let end = rest
-        .find(['.', '}', ' '])
-        // .find(|c: char| c == ',' || c == '}' || c == ' ')
+        .find([',', '}'])
         .unwrap_or(rest.len());
 
     rest[..end].trim().parse().ok()

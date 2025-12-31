@@ -439,36 +439,58 @@ fn extract_signal_dbm(data: &[u8]) -> Option<i32> {
         return None;
     }
 
-    let present = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+    // Collect all present bitmasks (handle extended flags - bit 31)
+    let mut present_words: Vec<u32> = Vec::new();
+    let mut pos = 4;
+    loop {
+        if pos + 4 > data.len() {
+            return None;
+        }
+        let present = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        present_words.push(present);
+        pos += 4;
+        if present & (1 << 31) == 0 {
+            break;
+        }
+    }
 
-    if present & (1 << 5) == 0 {
+    let first_present = present_words[0];
+
+    // Check if DBM Antenna Signal (bit 5) is present
+    if first_present & (1 << 5) == 0 {
         return None;
     }
 
-    let mut offset = 8;
+    let mut offset = pos; // Start after all present words
 
-    if present & (1 << 0) != 0 {
+    // Bit 0: TSFT - 8 bytes, requires 8-byte alignment
+    if first_present & (1 << 0) != 0 {
         offset = (offset + 7) & !7;
         offset += 8;
     }
 
-    if present & (1 << 1) != 0 {
+    // Bit 1: Flags - 1 byte
+    if first_present & (1 << 1) != 0 {
         offset += 1;
     }
 
-    if present & (1 << 2) != 0 {
+    // Bit 2: Rate - 1 byte
+    if first_present & (1 << 2) != 0 {
         offset += 1;
     }
 
-    if present & (1 << 3) != 0 {
+    // Bit 3: Channel - 4 bytes, requires 2-byte alignment
+    if first_present & (1 << 3) != 0 {
         offset = (offset + 1) & !1;
         offset += 4;
     }
 
-    if present & (1 << 4) != 0 {
+    // Bit 4: FHSS - 2 bytes
+    if first_present & (1 << 4) != 0 {
         offset += 2;
     }
 
+    // Bit 5: DBM Antenna Signal - 1 byte signed
     if offset < radiotap_len {
         let signal = data[offset] as i8;
         return Some(signal as i32);
