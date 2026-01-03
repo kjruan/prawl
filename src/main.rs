@@ -1,17 +1,22 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use log::{error, info, LevelFilter};
+use log::{error, info, warn, LevelFilter};
+use pcap::Capture;
 use prowl::analysis::SurveillanceAnalyzer;
 use prowl::capture::CaptureEngine;
-use prowl::channels::{find_monitor_interface, is_monitor_mode, list_wireless_interfaces, set_monitor_mode};
+use prowl::channels::{
+    find_monitor_interface, is_monitor_mode, list_wireless_interfaces, set_monitor_mode,
+};
 use prowl::config::Config;
 use prowl::database::Database;
+use prowl::distance::calibrate_tx_power;
 use prowl::ignore::{create_default_ignore_lists, IgnoreLists};
 use prowl::report::ReportGenerator;
 use prowl::tui;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[derive(Parser)]
 #[command(name = "prowl")]
@@ -102,6 +107,21 @@ enum Commands {
 
     /// Scan for wireless interfaces
     Scan,
+
+    /// Calibrate distance estimation by capturing at known distance
+    Calibrate {
+        /// Known distance in meters to the probe source
+        #[arg(long)]
+        distance: f64,
+
+        /// Duration to capture samples (seconds)
+        #[arg(short = 't', long, default_value = "30")]
+        duration: u64,
+
+        /// Set interface to monitor mode before capture
+        #[arg(long)]
+        set_monitor: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -174,31 +194,26 @@ async fn main() -> Result<()> {
 
     // Execute command
     match cli.command {
-        Commands::Capture { set_monitor } => {
-            handle_capture(config, set_monitor).await
-        }
-        Commands::Analyze { last_hours, output } => {
-            handle_analyze(config, last_hours, output)
-        }
-        Commands::Report { output, report_type } => {
-            handle_report(config, output, report_type)
-        }
-        Commands::List { last_hours, detailed } => {
-            handle_list(config, last_hours, detailed)
-        }
-        Commands::Stats => {
-            handle_stats(config)
-        }
+        Commands::Capture { set_monitor } => handle_capture(config, set_monitor).await,
+        Commands::Analyze { last_hours, output } => handle_analyze(config, last_hours, output),
+        Commands::Report {
+            output,
+            report_type,
+        } => handle_report(config, output, report_type),
+        Commands::List {
+            last_hours,
+            detailed,
+        } => handle_list(config, last_hours, detailed),
+        Commands::Stats => handle_stats(config),
         Commands::Init => unreachable!(),
-        Commands::Db { action } => {
-            handle_db(config, action)
-        }
-        Commands::Tui { set_monitor } => {
-            tui::run_tui(config, set_monitor).await
-        }
-        Commands::Scan => {
-            handle_scan()
-        }
+        Commands::Db { action } => handle_db(config, action),
+        Commands::Tui { set_monitor } => tui::run_tui(config, set_monitor).await,
+        Commands::Scan => handle_scan(),
+        Commands::Calibrate {
+            distance,
+            duration,
+            set_monitor,
+        } => handle_calibrate(config, distance, duration, set_monitor).await,
     }
 }
 
@@ -243,6 +258,208 @@ fn handle_scan() -> Result<()> {
     Ok(())
 }
 
+async fn handle_calibrate(
+    mut config: Config,
+    known_distance: f64, // in meters
+    duration_secs: u64,
+    set_monitor: bool,
+) -> Result<()> {
+    println!("=== Distance Calibration Mode ===");
+    println!();
+    println!("Instructions:");
+    println!(
+        "1. Position a device at exactly {:.1}m from this sensor",
+        known_distance
+    );
+    println!("2. Make sure the device is actively sending probe requests");
+    println!("   (e.g., with WiFi on but not connected, or scanning for networks)");
+    println!(
+        "3. Keep the device stationary for {} seconds",
+        duration_secs
+    );
+    println!();
+
+    // Set up interface
+    let interface = if set_monitor {
+        set_monitor_mode(&config.capture.interface)?;
+        config.capture.interface.clone()
+    } else if is_monitor_mode(&config.capture.interface)? {
+        config.capture.interface.clone()
+    } else if let Some(found) = find_monitor_interface()? {
+        info!("Auto-detected monitor interface: {}", found);
+        config.capture.interface = found.clone();
+        found
+    } else {
+        error!(
+            "Interface {} is not in monitor mode and no monitor interface found.",
+            config.capture.interface
+        );
+        error!("Use --set-monitor to enable monitor mode.");
+        return Ok(());
+    };
+
+    println!("Using interface: {}", interface);
+    println!("Capturing for {} seconds...", duration_secs);
+    println!();
+
+    // Open capture
+    let mut cap = Capture::from_device(interface.as_str())
+        .context("Failed to open capture device")?
+        .promisc(true)
+        .snaplen(65535)
+        .timeout(100)
+        .open()
+        .context("Failed to activate capture")?;
+
+    if let Err(e) = cap.filter("type mgt subtype probe-req", true) {
+        warn!("Failed to set BPF filter: {}", e);
+    }
+
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+
+    ctrlc::set_handler(move || {
+        eprintln!("\nStopping calibration...");
+        r.store(false, Ordering::SeqCst);
+    })?;
+
+    let start = Instant::now();
+    let duration = Duration::from_secs(duration_secs);
+    let mut rssi_samples: Vec<i32> = Vec::new();
+
+    while running.load(Ordering::SeqCst) && start.elapsed() < duration {
+        match cap.next_packet() {
+            Ok(packet) => {
+                if let Some(signal) = extract_signal_for_calibration(packet.data) {
+                    rssi_samples.push(signal);
+                    print!(
+                        "\rSamples collected: {} (avg: {:.1} dBm)    ",
+                        rssi_samples.len(),
+                        rssi_samples.iter().sum::<i32>() as f64 / rssi_samples.len() as f64
+                    );
+                    std::io::Write::flush(&mut std::io::stdout())?;
+                }
+            }
+            Err(pcap::Error::TimeoutExpired) => continue,
+            Err(e) => {
+                error!("Capture error: {}", e);
+                break;
+            }
+        }
+    }
+
+    println!();
+    println!();
+
+    if rssi_samples.is_empty() {
+        error!("No probe requests captured!");
+        error!("Make sure:");
+        error!("  - A device is sending probe requests (WiFi on, scanning)");
+        error!("  - The interface is in monitor mode");
+        return Ok(());
+    }
+
+    // Calculate calibration
+    let avg_rssi = rssi_samples.iter().sum::<i32>() / rssi_samples.len() as i32;
+    let min_rssi = *rssi_samples.iter().min().unwrap();
+    let max_rssi = *rssi_samples.iter().max().unwrap();
+
+    println!("=== Calibration Results ===");
+    println!("Samples collected: {}", rssi_samples.len());
+    println!("RSSI range: {} to {} dBm", min_rssi, max_rssi);
+    println!("Average RSSI: {} dBm", avg_rssi);
+    println!();
+
+    if let Some(result) =
+        calibrate_tx_power(avg_rssi, known_distance, config.distance.path_loss_exponent)
+    {
+        println!("Calculated TX Power: {:.1} dBm", result.calculated_tx_power);
+        println!();
+
+        // Update config
+        config.distance.calibrated_tx_power = Some(result.calculated_tx_power);
+        config.distance.calibration_distance_m = Some(known_distance);
+        config.distance.calibrated_at = Some(chrono::Utc::now().to_rfc3339());
+
+        // Save config
+        if let Err(e) = config.save("config.json") {
+            error!("Failed to save config: {}", e);
+            println!("You can manually add to config.json:");
+            println!(
+                "  \"calibrated_tx_power\": {:.1}",
+                result.calculated_tx_power
+            );
+        } else {
+            println!("Configuration saved to config.json");
+            println!();
+            println!("Distance estimation will now use the calibrated value.");
+        }
+    } else {
+        error!("Calibration failed - invalid input values");
+    }
+
+    Ok(())
+}
+
+fn extract_signal_for_calibration(data: &[u8]) -> Option<i32> {
+    // Basic radiotap signal extraction
+    if data.len() < 8 || data[0] != 0 {
+        return None;
+    }
+
+    let radiotap_len = u16::from_le_bytes([data[2], data[3]]) as usize;
+    if radiotap_len > data.len() || radiotap_len < 8 {
+        return None;
+    }
+
+    let mut present_words: Vec<u32> = Vec::new();
+    let mut pos = 4;
+    loop {
+        if pos + 4 > data.len() {
+            return None;
+        }
+        let present = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        present_words.push(present);
+        pos += 4;
+        if present & (1 << 31) == 0 {
+            break;
+        }
+    }
+
+    let first_present = present_words[0];
+
+    if first_present & (1 << 5) == 0 {
+        return None;
+    }
+
+    let mut offset = pos;
+
+    if first_present & (1 << 0) != 0 {
+        offset = (offset + 7) & !7;
+        offset += 8;
+    }
+    if first_present & (1 << 1) != 0 {
+        offset += 1;
+    }
+    if first_present & (1 << 2) != 0 {
+        offset += 1;
+    }
+    if first_present & (1 << 3) != 0 {
+        offset = (offset + 1) & !1;
+        offset += 4;
+    }
+    if first_present & (1 << 4) != 0 {
+        offset += 2;
+    }
+
+    if offset < radiotap_len {
+        let signal = data[offset] as i8;
+        return Some(signal as i32);
+    }
+
+    None
+}
+
 async fn handle_capture(mut config: Config, set_monitor: bool) -> Result<()> {
     // Try to auto-detect monitor interface if configured one isn't in monitor mode
     let interface = if set_monitor {
@@ -266,14 +483,11 @@ async fn handle_capture(mut config: Config, set_monitor: bool) -> Result<()> {
     info!("Using interface: {}", interface);
 
     // Open database
-    let db = Database::open(&config.capture.database)
-        .context("Failed to open database")?;
+    let db = Database::open(&config.capture.database).context("Failed to open database")?;
 
     // Load ignore lists
-    let ignore_lists = IgnoreLists::load(
-        &config.ignore_lists.mac,
-        &config.ignore_lists.ssid,
-    ).unwrap_or_default();
+    let ignore_lists =
+        IgnoreLists::load(&config.ignore_lists.mac, &config.ignore_lists.ssid).unwrap_or_default();
 
     // Set up shared running flag for signal handling
     let running = Arc::new(AtomicBool::new(true));
@@ -300,8 +514,7 @@ async fn handle_capture(mut config: Config, set_monitor: bool) -> Result<()> {
 }
 
 fn handle_analyze(config: Config, last_hours: u32, output: Option<PathBuf>) -> Result<()> {
-    let db = Database::open(&config.capture.database)
-        .context("Failed to open database")?;
+    let db = Database::open(&config.capture.database).context("Failed to open database")?;
 
     let analyzer = SurveillanceAnalyzer::new(
         config.analysis.time_windows_minutes,
@@ -310,15 +523,11 @@ fn handle_analyze(config: Config, last_hours: u32, output: Option<PathBuf>) -> R
 
     let alerts = analyzer.analyze(&db, last_hours)?;
 
-    ReportGenerator::generate_surveillance_report(
-        &alerts,
-        output.as_deref(),
-    )
+    ReportGenerator::generate_surveillance_report(&alerts, output.as_deref())
 }
 
 fn handle_report(config: Config, output: Option<PathBuf>, report_type: String) -> Result<()> {
-    let db = Database::open(&config.capture.database)
-        .context("Failed to open database")?;
+    let db = Database::open(&config.capture.database).context("Failed to open database")?;
 
     match report_type.as_str() {
         "devices" => ReportGenerator::generate_device_list(&db, output.as_deref()),
@@ -331,8 +540,7 @@ fn handle_report(config: Config, output: Option<PathBuf>, report_type: String) -
 }
 
 fn handle_list(config: Config, last_hours: Option<u32>, detailed: bool) -> Result<()> {
-    let db = Database::open(&config.capture.database)
-        .context("Failed to open database")?;
+    let db = Database::open(&config.capture.database).context("Failed to open database")?;
 
     let devices = if let Some(hours) = last_hours {
         let now = chrono::Utc::now().timestamp();
@@ -374,8 +582,7 @@ fn handle_list(config: Config, last_hours: Option<u32>, detailed: bool) -> Resul
 }
 
 fn handle_stats(config: Config) -> Result<()> {
-    let db = Database::open(&config.capture.database)
-        .context("Failed to open database")?;
+    let db = Database::open(&config.capture.database).context("Failed to open database")?;
 
     ReportGenerator::generate_stats(&db)
 }
@@ -407,16 +614,12 @@ fn handle_db(config: Config, action: DbCommands) -> Result<()> {
 
     match action {
         DbCommands::Query { sql } => {
-            let conn = Connection::open(db_path)
-                .context("Failed to open database")?;
+            let conn = Connection::open(db_path).context("Failed to open database")?;
 
             let mut stmt = conn.prepare(&sql)?;
             let column_count = stmt.column_count();
-            let column_names: Vec<String> = stmt
-                .column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
+            let column_names: Vec<String> =
+                stmt.column_names().iter().map(|s| s.to_string()).collect();
 
             // Print header
             println!("{}", column_names.join(" | "));
@@ -437,16 +640,14 @@ fn handle_db(config: Config, action: DbCommands) -> Result<()> {
         }
 
         DbCommands::Schema => {
-            let conn = Connection::open(db_path)
-                .context("Failed to open database")?;
+            let conn = Connection::open(db_path).context("Failed to open database")?;
 
             println!("Database: {}", db_path);
             println!();
 
             // Get all tables
-            let mut stmt = conn.prepare(
-                "SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name"
-            )?;
+            let mut stmt = conn
+                .prepare("SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name")?;
             let mut rows = stmt.query([])?;
 
             while let Some(row) = rows.next()? {
@@ -471,16 +672,12 @@ fn handle_db(config: Config, action: DbCommands) -> Result<()> {
         }
 
         DbCommands::Export { table, output } => {
-            let conn = Connection::open(db_path)
-                .context("Failed to open database")?;
+            let conn = Connection::open(db_path).context("Failed to open database")?;
 
             let sql = format!("SELECT * FROM {}", table);
             let mut stmt = conn.prepare(&sql)?;
-            let column_names: Vec<String> = stmt
-                .column_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
+            let column_names: Vec<String> =
+                stmt.column_names().iter().map(|s| s.to_string()).collect();
             let column_count = stmt.column_count();
 
             let mut writer: Box<dyn Write> = match &output {
@@ -510,10 +707,9 @@ fn handle_db(config: Config, action: DbCommands) -> Result<()> {
         }
 
         DbCommands::Import { source } => {
-            let src_conn = Connection::open(&source)
-                .context("Failed to open source database")?;
-            let dst_conn = Connection::open(db_path)
-                .context("Failed to open destination database")?;
+            let src_conn = Connection::open(&source).context("Failed to open source database")?;
+            let dst_conn =
+                Connection::open(db_path).context("Failed to open destination database")?;
 
             // Check if source has devices/probes tables
             let has_devices: bool = src_conn
@@ -531,9 +727,8 @@ fn handle_db(config: Config, action: DbCommands) -> Result<()> {
             // Import devices
             let mut count = 0;
             {
-                let mut stmt = src_conn.prepare(
-                    "SELECT mac, first_seen, last_seen FROM devices"
-                )?;
+                let mut stmt =
+                    src_conn.prepare("SELECT mac, first_seen, last_seen FROM devices")?;
                 let mut rows = stmt.query([])?;
                 while let Some(row) = rows.next()? {
                     let mac: String = row.get(0)?;
@@ -553,7 +748,7 @@ fn handle_db(config: Config, action: DbCommands) -> Result<()> {
             count = 0;
             {
                 let mut stmt = src_conn.prepare(
-                    "SELECT device_id, ssid, timestamp, lat, lon, signal_dbm, channel FROM probes"
+                    "SELECT device_id, ssid, timestamp, lat, lon, signal_dbm, channel FROM probes",
                 )?;
                 let mut rows = stmt.query([])?;
                 while let Some(row) = rows.next()? {
@@ -576,8 +771,7 @@ fn handle_db(config: Config, action: DbCommands) -> Result<()> {
         }
 
         DbCommands::Vacuum => {
-            let conn = Connection::open(db_path)
-                .context("Failed to open database")?;
+            let conn = Connection::open(db_path).context("Failed to open database")?;
 
             let size_before: i64 = std::fs::metadata(db_path)?.len() as i64;
             conn.execute("VACUUM", [])?;

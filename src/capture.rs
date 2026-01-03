@@ -163,6 +163,7 @@ impl CaptureEngine {
                             signal_dbm: probe.signal_dbm,
                             channel: current_channel,
                             distance_m,
+                            capabilities: Some(probe.capabilities.clone()),
                         };
 
                         if let Err(e) = self.db.insert_probe(&capture) {

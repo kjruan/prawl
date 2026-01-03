@@ -393,6 +393,7 @@ async fn run_capture_loop(
                         signal_dbm: probe.signal_dbm,
                         channel: None,
                         distance_m,
+                        capabilities: Some(probe.capabilities.clone()),
                     };
 
                     let _ = db.insert_probe(&capture);
@@ -405,6 +406,7 @@ async fn run_capture_loop(
                         signal_dbm: probe.signal_dbm,
                         distance_m,
                         channel: None,
+                        capabilities: Some(probe.capabilities),
                     };
 
                     let _ = event_tx.send(TuiEvent::ProbeReceived(log_entry)).await;

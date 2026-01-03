@@ -1,3 +1,8 @@
+use crate::distance::{
+    AdaptiveCalibrator, CalibrationStatus, DistanceEstimate, RssiTracker,
+    estimate_distance_smart, estimate_tx_power_from_wifi_gen,
+};
+use crate::parser::ProbeCapabilities;
 use crate::tui::TuiEvent;
 use std::collections::VecDeque;
 use tokio::sync::mpsc;
@@ -45,6 +50,12 @@ pub struct DeviceEntry {
     pub ssids: Vec<String>,
     pub last_signal: Option<i32>,
     pub last_distance: Option<f64>,
+    pub capabilities: Option<ProbeCapabilities>,
+    pub wifi_generation: Option<String>,
+    /// RSSI history for averaging
+    pub rssi_tracker: RssiTracker,
+    /// Computed distance estimate with uncertainty
+    pub distance_estimate: Option<DistanceEstimate>,
 }
 
 /// Single probe log entry for display
@@ -56,6 +67,7 @@ pub struct ProbeLogEntry {
     pub signal_dbm: Option<i32>,
     pub distance_m: Option<f64>,
     pub channel: Option<u8>,
+    pub capabilities: Option<ProbeCapabilities>,
 }
 
 /// Main application state
@@ -109,6 +121,12 @@ pub struct App {
 
     /// Probe count since start
     pub probes_since_start: usize,
+
+    /// Adaptive path loss calibrator
+    pub calibrator: AdaptiveCalibrator,
+
+    /// Current calibration status for display
+    pub calibration_status: Option<CalibrationStatus>,
 }
 
 impl App {
@@ -132,6 +150,8 @@ impl App {
             detail_view: None,
             event_rx,
             probes_since_start: 0,
+            calibrator: AdaptiveCalibrator::default(),
+            calibration_status: None,
         }
     }
 
@@ -141,6 +161,34 @@ impl App {
             self.stats.probes_per_minute = (self.probes_since_start as f64)
                 / (self.stats.capture_duration_secs as f64 / 60.0);
         }
+
+        // Run adaptive calibration on devices with enough samples
+        let path_loss = self.calibrator.path_loss();
+        for device in &mut self.devices {
+            // Only analyze devices with enough RSSI history
+            if device.rssi_tracker.sample_count() >= 10 {
+                if let Some(stats) = device.rssi_tracker.stats() {
+                    let tx_power = estimate_tx_power_from_wifi_gen(
+                        device.wifi_generation.as_deref()
+                    );
+                    self.calibrator.analyze_device(&stats, tx_power);
+                }
+            }
+
+            // Update distance estimate using calibrator's path loss
+            if let Some(avg_rssi) = device.rssi_tracker.weighted_average() {
+                device.distance_estimate = estimate_distance_smart(
+                    avg_rssi,
+                    device.wifi_generation.as_deref(),
+                    path_loss,
+                    device.rssi_tracker.sample_count(),
+                    self.calibrator.inferred_tx_power(),
+                );
+            }
+        }
+
+        // Update calibration status for display
+        self.calibration_status = Some(self.calibrator.status());
     }
 
     pub fn handle_event(&mut self, event: TuiEvent) {
@@ -157,10 +205,32 @@ impl App {
                     if !entry.ssid.is_empty() && !device.ssids.contains(&entry.ssid) {
                         device.ssids.push(entry.ssid.clone());
                     }
+                    // Track RSSI for averaging and calibration
+                    if let Some(rssi) = entry.signal_dbm {
+                        device.rssi_tracker.add_sample(rssi);
+                        // Record strong signals for TX power estimation
+                        self.calibrator.record_peak_rssi(rssi);
+                    }
+                    // Update capabilities if present (keep most recent)
+                    if entry.capabilities.is_some() {
+                        device.capabilities = entry.capabilities.clone();
+                        device.wifi_generation = entry.capabilities.as_ref()
+                            .map(|c| c.wifi_generation.clone())
+                            .filter(|s| !s.is_empty());
+                    }
                 } else {
                     let mut ssids = Vec::new();
                     if !entry.ssid.is_empty() {
                         ssids.push(entry.ssid.clone());
+                    }
+                    let wifi_generation = entry.capabilities.as_ref()
+                        .map(|c| c.wifi_generation.clone())
+                        .filter(|s| !s.is_empty());
+                    let mut rssi_tracker = RssiTracker::default();
+                    if let Some(rssi) = entry.signal_dbm {
+                        rssi_tracker.add_sample(rssi);
+                        // Record strong signals for TX power estimation
+                        self.calibrator.record_peak_rssi(rssi);
                     }
                     self.devices.push(DeviceEntry {
                         mac: entry.mac.clone(),
@@ -170,6 +240,10 @@ impl App {
                         ssids,
                         last_signal: entry.signal_dbm,
                         last_distance: entry.distance_m,
+                        capabilities: entry.capabilities.clone(),
+                        wifi_generation,
+                        rssi_tracker,
+                        distance_estimate: None,
                     });
                 }
 

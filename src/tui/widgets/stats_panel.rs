@@ -64,6 +64,41 @@ pub fn render_stats(frame: &mut Frame, area: Rect, app: &App) {
         ]),
     ];
 
+    // Add calibration status if available
+    let mut lines = lines;
+    if let Some(cal) = &app.calibration_status {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "─ Calibration ─",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(vec![
+            Span::styled("Path Loss:", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!(" {:.2}", cal.path_loss_exponent),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]));
+        if let Some(tx) = cal.inferred_tx_power {
+            lines.push(Line::from(vec![
+                Span::styled("TX Power: ", Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    format!("{:.0} dBm", tx),
+                    Style::default().fg(Color::Green),
+                ),
+            ]));
+        }
+        if let Some(peak) = cal.peak_rssi {
+            lines.push(Line::from(vec![
+                Span::styled("Peak RSSI:", Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    format!(" {} dBm", peak),
+                    Style::default().fg(Color::Magenta),
+                ),
+            ]));
+        }
+    }
+
     let paragraph = Paragraph::new(lines).block(block);
 
     frame.render_widget(paragraph, area);

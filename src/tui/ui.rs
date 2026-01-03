@@ -1,3 +1,4 @@
+use crate::distance::{estimate_distance_smart, DistanceConfidence};
 use crate::oui::{infer_device_type, is_randomized_mac, lookup_vendor};
 use crate::tui::app::{ActivePanel, App};
 use crate::tui::widgets::{
@@ -108,9 +109,9 @@ fn draw_header(frame: &mut Frame, area: Rect) {
 fn draw_device_detail(frame: &mut Frame, area: Rect, app: &App, idx: usize) {
     let device = &app.devices[idx];
 
-    // Center the popup
-    let popup_width = 60.min(area.width.saturating_sub(4));
-    let popup_height = 18.min(area.height.saturating_sub(4));
+    // Center the popup - make it larger for capabilities
+    let popup_width = 70.min(area.width.saturating_sub(4));
+    let popup_height = 35.min(area.height.saturating_sub(4));
     let popup_x = (area.width.saturating_sub(popup_width)) / 2;
     let popup_y = (area.height.saturating_sub(popup_height)) / 2;
 
@@ -128,15 +129,42 @@ fn draw_device_detail(frame: &mut Frame, area: Rect, app: &App, idx: usize) {
         .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
         .unwrap_or_else(|| "Unknown".to_string());
 
-    let signal_str = device
-        .last_signal
-        .map(|s| format!("{} dBm", s))
+    // Get averaged signal if available
+    let avg_rssi = device.rssi_tracker.weighted_average();
+    let sample_count = device.rssi_tracker.sample_count();
+
+    let signal_str = avg_rssi
+        .or(device.last_signal)
+        .map(|s| {
+            if sample_count > 1 {
+                format!("{} dBm (avg of {})", s, sample_count)
+            } else {
+                format!("{} dBm", s)
+            }
+        })
         .unwrap_or_else(|| "N/A".to_string());
 
-    let distance_str = device
-        .last_distance
-        .map(|d| format!("{:.1}m", d))
-        .unwrap_or_else(|| "N/A".to_string());
+    // Calculate distance with uncertainty using smart estimation
+    let distance_estimate = avg_rssi.and_then(|rssi| {
+        estimate_distance_smart(
+            rssi,
+            device.wifi_generation.as_deref(),
+            3.0, // path loss exponent
+            sample_count,
+            None, // no calibration yet
+        )
+    });
+
+    let distance_str = if let Some(est) = distance_estimate {
+        let confidence_indicator = match est.confidence {
+            DistanceConfidence::Low => "?",
+            DistanceConfidence::Medium => "",
+            DistanceConfidence::High => "",
+        };
+        format!("~{:.0}m ({:.0}-{:.0}m){}", est.center, est.min, est.max, confidence_indicator)
+    } else {
+        "N/A".to_string()
+    };
 
     let ssids_str = if device.ssids.is_empty() {
         "<broadcast only>".to_string()
@@ -151,7 +179,7 @@ fn draw_device_detail(frame: &mut Frame, area: Rect, app: &App, idx: usize) {
     let is_random = is_randomized_mac(&device.mac);
     let mac_type = if is_random { "Randomized" } else { "Real" };
 
-    let content = vec![
+    let mut content = vec![
         Line::from(vec![
             Span::styled("MAC: ", Style::default().fg(Color::Yellow)),
             Span::raw(&device.mac),
@@ -195,12 +223,185 @@ fn draw_device_detail(frame: &mut Frame, area: Rect, app: &App, idx: usize) {
             Span::styled("SSIDs: ", Style::default().fg(Color::Yellow)),
             Span::raw(ssids_str),
         ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Press ESC to close",
-            Style::default().fg(Color::DarkGray),
-        )),
     ];
+
+    // Add capabilities section if available
+    if let Some(caps) = &device.capabilities {
+        content.push(Line::from(""));
+        content.push(Line::from(Span::styled(
+            "═══ WiFi Capabilities ═══",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )));
+
+        // WiFi Generation
+        if !caps.wifi_generation.is_empty() {
+            content.push(Line::from(vec![
+                Span::styled("Generation: ", Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    &caps.wifi_generation,
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
+
+        // Max Rate
+        if let Some(rate) = caps.max_rate_mbps {
+            content.push(Line::from(vec![
+                Span::styled("Max Rate: ", Style::default().fg(Color::Yellow)),
+                Span::raw(format!("{:.1} Mbps", rate)),
+            ]));
+        }
+
+        // Supported Rates
+        if !caps.supported_rates_mbps.is_empty() {
+            let rates_str: Vec<String> = caps.supported_rates_mbps.iter()
+                .map(|r| format!("{:.0}", r))
+                .collect();
+            content.push(Line::from(vec![
+                Span::styled("Rates: ", Style::default().fg(Color::Yellow)),
+                Span::raw(format!("{} Mbps", rates_str.join(", "))),
+            ]));
+        }
+
+        // HT Capabilities (802.11n)
+        if let Some(ht) = &caps.ht_caps {
+            content.push(Line::from(""));
+            content.push(Line::from(Span::styled(
+                "── HT (802.11n) ──",
+                Style::default().fg(Color::Blue),
+            )));
+            content.push(Line::from(vec![
+                Span::styled("40MHz: ", Style::default().fg(Color::Yellow)),
+                Span::raw(if ht.channel_width_40mhz { "Yes" } else { "No" }),
+                Span::raw("  "),
+                Span::styled("Short GI: ", Style::default().fg(Color::Yellow)),
+                Span::raw(format!("20:{} 40:{}",
+                    if ht.short_gi_20 { "Y" } else { "N" },
+                    if ht.short_gi_40 { "Y" } else { "N" }
+                )),
+            ]));
+            content.push(Line::from(vec![
+                Span::styled("TX STBC: ", Style::default().fg(Color::Yellow)),
+                Span::raw(if ht.tx_stbc { "Yes" } else { "No" }),
+                Span::raw("  "),
+                Span::styled("RX STBC: ", Style::default().fg(Color::Yellow)),
+                Span::raw(format!("{}", ht.rx_stbc)),
+            ]));
+        }
+
+        // VHT Capabilities (802.11ac)
+        if let Some(vht) = &caps.vht_caps {
+            content.push(Line::from(""));
+            content.push(Line::from(Span::styled(
+                "── VHT (802.11ac) ──",
+                Style::default().fg(Color::Blue),
+            )));
+            let width_str = match vht.supported_channel_width {
+                0 => "80 MHz",
+                1 => "160 MHz",
+                2 => "160 MHz + 80+80 MHz",
+                _ => "Unknown",
+            };
+            content.push(Line::from(vec![
+                Span::styled("Max Width: ", Style::default().fg(Color::Yellow)),
+                Span::raw(width_str),
+            ]));
+            content.push(Line::from(vec![
+                Span::styled("Beamforming: ", Style::default().fg(Color::Yellow)),
+                Span::raw(format!("SU:{} MU:{}",
+                    if vht.su_beamformer { "Y" } else { "N" },
+                    if vht.mu_beamformer { "Y" } else { "N" }
+                )),
+            ]));
+        }
+
+        // RSN Security Info
+        if let Some(rsn) = &caps.rsn_info {
+            content.push(Line::from(""));
+            content.push(Line::from(Span::styled(
+                "── Security (RSN) ──",
+                Style::default().fg(Color::Blue),
+            )));
+            content.push(Line::from(vec![
+                Span::styled("Auth: ", Style::default().fg(Color::Yellow)),
+                Span::raw(rsn.akm_suites.join(", ")),
+            ]));
+            content.push(Line::from(vec![
+                Span::styled("Cipher: ", Style::default().fg(Color::Yellow)),
+                Span::raw(rsn.pairwise_ciphers.join(", ")),
+            ]));
+            let mfp_str = match (rsn.mfp_required, rsn.mfp_capable) {
+                (true, _) => "Required",
+                (false, true) => "Capable",
+                (false, false) => "No",
+            };
+            content.push(Line::from(vec![
+                Span::styled("MFP: ", Style::default().fg(Color::Yellow)),
+                Span::raw(mfp_str),
+            ]));
+        }
+
+        // WPS Info
+        if let Some(wps) = &caps.wps_info {
+            content.push(Line::from(""));
+            content.push(Line::from(Span::styled(
+                "── WPS Device Info ──",
+                Style::default().fg(Color::Blue),
+            )));
+            if !wps.device_name.is_empty() {
+                content.push(Line::from(vec![
+                    Span::styled("Name: ", Style::default().fg(Color::Yellow)),
+                    Span::styled(&wps.device_name, Style::default().fg(Color::Green)),
+                ]));
+            }
+            if !wps.manufacturer.is_empty() {
+                content.push(Line::from(vec![
+                    Span::styled("Manufacturer: ", Style::default().fg(Color::Yellow)),
+                    Span::raw(&wps.manufacturer),
+                ]));
+            }
+            if !wps.model.is_empty() {
+                content.push(Line::from(vec![
+                    Span::styled("Model: ", Style::default().fg(Color::Yellow)),
+                    Span::raw(&wps.model),
+                ]));
+            }
+            if !wps.model_number.is_empty() {
+                content.push(Line::from(vec![
+                    Span::styled("Model #: ", Style::default().fg(Color::Yellow)),
+                    Span::raw(&wps.model_number),
+                ]));
+            }
+        }
+
+        // Vendor IEs
+        if !caps.vendor_ies.is_empty() {
+            content.push(Line::from(""));
+            content.push(Line::from(Span::styled(
+                "── Vendor IEs ──",
+                Style::default().fg(Color::Blue),
+            )));
+            for vie in caps.vendor_ies.iter().take(5) {
+                let vendor_name = vie.vendor_name.as_deref().unwrap_or("Unknown");
+                content.push(Line::from(vec![
+                    Span::styled(vendor_name, Style::default().fg(Color::Yellow)),
+                    Span::raw(format!(" ({}) - {} bytes", vie.oui, vie.data_len)),
+                ]));
+            }
+            if caps.vendor_ies.len() > 5 {
+                content.push(Line::from(Span::styled(
+                    format!("... and {} more", caps.vendor_ies.len() - 5),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+    }
+
+    content.push(Line::from(""));
+    content.push(Line::from(Span::styled(
+        "Press ESC to close",
+        Style::default().fg(Color::DarkGray),
+    )));
 
     let popup = Paragraph::new(content).block(
         Block::default()

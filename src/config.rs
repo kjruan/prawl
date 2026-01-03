@@ -17,18 +17,45 @@ pub struct Config {
 pub struct DistanceConfig {
     /// Enable distance estimation
     pub enabled: bool,
-    /// Reference signal strength at 1 meter (dBm), typical range: -40 to -50
+    /// Default reference signal strength at 1 meter (dBm), typical range: -38 to -50
+    #[serde(default = "default_tx_power")]
     pub tx_power_dbm: f64,
     /// Path loss exponent: 2.0 = free space, 2.5-4.0 = indoors with obstacles
+    #[serde(default = "default_path_loss")]
     pub path_loss_exponent: f64,
+    /// Use WiFi generation to estimate TX power (overrides tx_power_dbm when true)
+    #[serde(default = "default_true")]
+    pub use_smart_tx_power: bool,
+    /// Calibrated TX power from user calibration (overrides smart estimation)
+    #[serde(default)]
+    pub calibrated_tx_power: Option<f64>,
+    /// When calibration was performed (ISO 8601 timestamp)
+    #[serde(default)]
+    pub calibrated_at: Option<String>,
+    /// Distance used for calibration
+    #[serde(default)]
+    pub calibration_distance_m: Option<f64>,
+    /// Number of RSSI samples to average per device
+    #[serde(default = "default_rssi_samples")]
+    pub rssi_average_samples: usize,
 }
+
+fn default_tx_power() -> f64 { -43.0 }
+fn default_path_loss() -> f64 { 3.0 }
+fn default_true() -> bool { true }
+fn default_rssi_samples() -> usize { 5 }
 
 impl Default for DistanceConfig {
     fn default() -> Self {
         DistanceConfig {
             enabled: true,
-            tx_power_dbm: -45.0,        // Typical smartphone at 1 meter
-            path_loss_exponent: 3.0,     // Indoor environment
+            tx_power_dbm: -43.0,              // Updated default
+            path_loss_exponent: 3.0,           // Indoor environment
+            use_smart_tx_power: true,          // Use WiFi gen estimation
+            calibrated_tx_power: None,
+            calibrated_at: None,
+            calibration_distance_m: None,
+            rssi_average_samples: 5,
         }
     }
 }

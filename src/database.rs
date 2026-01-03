@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
+use crate::parser::ProbeCapabilities;
+
 pub struct Database {
     conn: Connection,
 }
@@ -37,6 +39,7 @@ pub struct ProbeCapture {
     pub signal_dbm: Option<i32>,
     pub channel: Option<u8>,
     pub distance_m: Option<f64>,
+    pub capabilities: Option<ProbeCapabilities>,
 }
 
 impl Database {
@@ -79,11 +82,24 @@ impl Database {
                 FOREIGN KEY (device_id) REFERENCES devices(id)
             );
 
+            CREATE TABLE IF NOT EXISTS probe_capabilities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                probe_id INTEGER NOT NULL UNIQUE,
+                capabilities_json TEXT NOT NULL,
+                has_ht INTEGER DEFAULT 0,
+                has_vht INTEGER DEFAULT 0,
+                has_he INTEGER DEFAULT 0,
+                wifi_generation TEXT,
+                FOREIGN KEY (probe_id) REFERENCES probes(id) ON DELETE CASCADE
+            );
+
             CREATE INDEX IF NOT EXISTS idx_devices_mac ON devices(mac);
             CREATE INDEX IF NOT EXISTS idx_devices_last_seen ON devices(last_seen);
             CREATE INDEX IF NOT EXISTS idx_probes_timestamp ON probes(timestamp);
             CREATE INDEX IF NOT EXISTS idx_probes_ssid ON probes(ssid);
             CREATE INDEX IF NOT EXISTS idx_probes_device_id ON probes(device_id);
+            CREATE INDEX IF NOT EXISTS idx_probe_caps_probe_id ON probe_capabilities(probe_id);
+            CREATE INDEX IF NOT EXISTS idx_probe_caps_wifi_gen ON probe_capabilities(wifi_generation);
             "#,
         )?;
 
@@ -146,7 +162,66 @@ impl Database {
             ],
         )?;
 
+        let probe_id = self.conn.last_insert_rowid();
+
+        // Insert capabilities if present
+        if let Some(caps) = &capture.capabilities {
+            if let Ok(caps_json) = serde_json::to_string(caps) {
+                let _ = self.conn.execute(
+                    "INSERT INTO probe_capabilities (probe_id, capabilities_json, has_ht, has_vht, has_he, wifi_generation)
+                     VALUES (?, ?, ?, ?, ?, ?)",
+                    params![
+                        probe_id,
+                        caps_json,
+                        caps.has_ht as i32,
+                        caps.has_vht as i32,
+                        caps.has_he as i32,
+                        &caps.wifi_generation,
+                    ],
+                );
+            }
+        }
+
         Ok(())
+    }
+
+    /// Get the most recent capabilities for a device
+    pub fn get_device_capabilities(&self, device_id: i64) -> Result<Option<ProbeCapabilities>> {
+        let caps_json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT pc.capabilities_json
+                 FROM probe_capabilities pc
+                 JOIN probes p ON pc.probe_id = p.id
+                 WHERE p.device_id = ?
+                 ORDER BY p.timestamp DESC
+                 LIMIT 1",
+                params![device_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        match caps_json {
+            Some(json) => Ok(serde_json::from_str(&json).ok()),
+            None => Ok(None),
+        }
+    }
+
+    /// Get WiFi generation for a device
+    pub fn get_device_wifi_generation(&self, device_id: i64) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT pc.wifi_generation
+                 FROM probe_capabilities pc
+                 JOIN probes p ON pc.probe_id = p.id
+                 WHERE p.device_id = ?
+                 ORDER BY p.timestamp DESC
+                 LIMIT 1",
+                params![device_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn get_device_by_mac(&self, mac: &str) -> Result<Option<Device>> {
