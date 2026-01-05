@@ -7,7 +7,6 @@
 /// - tx_power: Reference signal strength at 1 meter (dBm)
 /// - rssi: Measured signal strength (dBm)
 /// - n: Path loss exponent (environment dependent)
-
 use std::collections::VecDeque;
 
 /// Distance estimate with uncertainty bounds
@@ -23,9 +22,7 @@ impl DistanceEstimate {
     /// Format as "~Xm (Y-Zm)"
     pub fn format(&self) -> String {
         if self.center < 1.0 {
-            format!("<1m")
-        } else if self.center < 10.0 {
-            format!("~{:.0}m ({:.0}-{:.0}m)", self.center, self.min, self.max)
+            "<1m".to_string()
         } else {
             format!("~{:.0}m ({:.0}-{:.0}m)", self.center, self.min, self.max)
         }
@@ -44,9 +41,9 @@ impl DistanceEstimate {
 /// Confidence level based on sample count
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DistanceConfidence {
-    Low,      // 1-2 samples
-    Medium,   // 3-4 samples
-    High,     // 5+ samples
+    Low,    // 1-2 samples
+    Medium, // 3-4 samples
+    High,   // 5+ samples
 }
 
 impl DistanceConfidence {
@@ -202,10 +199,10 @@ pub fn estimate_distance_range(
     let center = estimate_distance(rssi_dbm, tx_power_dbm, path_loss_exponent)?;
 
     // Higher path loss = closer estimate, lower = farther
-    let min = estimate_distance(rssi_dbm, tx_power_dbm, path_loss_exponent + 0.5)
-        .unwrap_or(center * 0.5);
-    let max = estimate_distance(rssi_dbm, tx_power_dbm, path_loss_exponent - 0.5)
-        .unwrap_or(center * 2.0);
+    let min =
+        estimate_distance(rssi_dbm, tx_power_dbm, path_loss_exponent + 0.5).unwrap_or(center * 0.5);
+    let max =
+        estimate_distance(rssi_dbm, tx_power_dbm, path_loss_exponent - 0.5).unwrap_or(center * 2.0);
 
     Some(DistanceEstimate {
         center,
@@ -226,8 +223,8 @@ pub fn estimate_distance_smart(
     calibrated_tx_power: Option<f64>,
 ) -> Option<DistanceEstimate> {
     // Use calibrated value if available, otherwise estimate from WiFi gen
-    let tx_power = calibrated_tx_power
-        .unwrap_or_else(|| estimate_tx_power_from_wifi_gen(wifi_generation));
+    let tx_power =
+        calibrated_tx_power.unwrap_or_else(|| estimate_tx_power_from_wifi_gen(wifi_generation));
 
     estimate_distance_range(rssi_dbm, tx_power, path_loss_exponent, sample_count)
 }
@@ -349,9 +346,11 @@ impl DeviceRssiStats {
         let mean = sum as f64 / n as f64;
 
         let variance = if n > 1 {
-            samples.iter()
+            samples
+                .iter()
                 .map(|&x| (x as f64 - mean).powi(2))
-                .sum::<f64>() / (n - 1) as f64
+                .sum::<f64>()
+                / (n - 1) as f64
         } else {
             0.0
         };
@@ -460,8 +459,8 @@ impl AdaptiveCalibrator {
         // Lower n = higher sensitivity = distances swing more per dBm change
 
         let rssi = stats.mean_rssi as i32;
-        let current_distance = estimate_distance(rssi, tx_power, self.current_path_loss)
-            .unwrap_or(1.0);
+        let current_distance =
+            estimate_distance(rssi, tx_power, self.current_path_loss).unwrap_or(1.0);
 
         // Expected distance variance given RSSI variance
         // Using linear approximation: var(d) ≈ (∂d/∂rssi)² * var(rssi)
@@ -499,8 +498,8 @@ impl AdaptiveCalibrator {
         let avg_adjustment = self.adjustment_accumulator / self.observation_count as f64;
         let delta = avg_adjustment * self.learning_rate;
 
-        self.current_path_loss = (self.current_path_loss + delta)
-            .clamp(self.min_path_loss, self.max_path_loss);
+        self.current_path_loss =
+            (self.current_path_loss + delta).clamp(self.min_path_loss, self.max_path_loss);
 
         // Reset accumulators
         self.adjustment_accumulator = 0.0;
@@ -521,7 +520,11 @@ impl AdaptiveCalibrator {
     pub fn status(&self) -> CalibrationStatus {
         CalibrationStatus {
             path_loss_exponent: self.current_path_loss,
-            peak_rssi: if self.peak_rssi > i32::MIN { Some(self.peak_rssi) } else { None },
+            peak_rssi: if self.peak_rssi > i32::MIN {
+                Some(self.peak_rssi)
+            } else {
+                None
+            },
             inferred_tx_power: self.inferred_tx_power(),
             observation_count: self.observation_count,
         }
@@ -585,9 +588,18 @@ mod tests {
 
     #[test]
     fn test_wifi_gen_tx_power() {
-        assert_eq!(estimate_tx_power_from_wifi_gen(Some("802.11ax (WiFi 6)")), -38.0);
-        assert_eq!(estimate_tx_power_from_wifi_gen(Some("802.11ac (WiFi 5)")), -41.0);
-        assert_eq!(estimate_tx_power_from_wifi_gen(Some("802.11n (WiFi 4)")), -45.0);
+        assert_eq!(
+            estimate_tx_power_from_wifi_gen(Some("802.11ax (WiFi 6)")),
+            -38.0
+        );
+        assert_eq!(
+            estimate_tx_power_from_wifi_gen(Some("802.11ac (WiFi 5)")),
+            -41.0
+        );
+        assert_eq!(
+            estimate_tx_power_from_wifi_gen(Some("802.11n (WiFi 4)")),
+            -45.0
+        );
         assert_eq!(estimate_tx_power_from_wifi_gen(None), -43.0);
     }
 

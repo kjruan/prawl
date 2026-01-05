@@ -115,11 +115,7 @@ pub fn parse_probe_request(data: &[u8], signal_dbm: Option<i32>) -> Option<Parse
                 Frame::ProbeRequest(probe_req) => {
                     // address_2 is the source address (transmitter) in probe requests
                     let source_mac = format_mac(&probe_req.header.address_2);
-                    let ssid = probe_req
-                        .station_info
-                        .ssid
-                        .clone()
-                        .unwrap_or_default();
+                    let ssid = probe_req.station_info.ssid.clone().unwrap_or_default();
 
                     // Extract all capabilities
                     let capabilities = extract_capabilities(&probe_req.station_info);
@@ -151,14 +147,22 @@ pub fn parse_probe_request(data: &[u8], signal_dbm: Option<i32>) -> Option<Parse
 
 /// Extract all capabilities from StationInfo
 fn extract_capabilities(station_info: &StationInfo) -> ProbeCapabilities {
-    let mut caps = ProbeCapabilities::default();
+    let mut caps = ProbeCapabilities {
+        supported_rates_mbps: station_info
+            .supported_rates
+            .iter()
+            .map(|r| r.rate)
+            .collect(),
+        ..Default::default()
+    };
+    //let mut caps = ProbeCapabilities::default();
 
     // Supported rates
-    caps.supported_rates_mbps = station_info
-        .supported_rates
-        .iter()
-        .map(|r| r.rate)
-        .collect();
+    //caps.supported_rates_mbps = station_info
+    //    .supported_rates
+    //    .iter()
+    //    .map(|r| r.rate)
+    //    .collect();
 
     if let Some(ext_rates) = &station_info.extended_supported_rates {
         caps.extended_rates_mbps = ext_rates.iter().map(|r| r.rate).collect();
