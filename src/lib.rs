@@ -10,6 +10,7 @@ pub mod oui;
 pub mod parser;
 pub mod report;
 pub mod tui;
+pub mod validation;
 
 pub use config::Config;
 pub use database::Database;

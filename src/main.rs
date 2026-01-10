@@ -7,6 +7,7 @@ use prowl::capture::CaptureEngine;
 use prowl::channels::{
     find_monitor_interface, is_monitor_mode, list_wireless_interfaces, set_monitor_mode,
 };
+use prowl::validation::validate_startup;
 use prowl::config::Config;
 use prowl::database::Database;
 use prowl::distance::calibrate_tx_power;
@@ -51,6 +52,10 @@ enum Commands {
         /// Set interface to monitor mode before capture
         #[arg(long)]
         set_monitor: bool,
+
+        /// Disable GPS functionality
+        #[arg(long)]
+        no_gps: bool,
     },
 
     /// Analyze captured data for surveillance patterns
@@ -103,6 +108,10 @@ enum Commands {
         /// Set interface to monitor mode before capture
         #[arg(long)]
         set_monitor: bool,
+
+        /// Disable GPS functionality
+        #[arg(long)]
+        no_gps: bool,
     },
 
     /// Scan for wireless interfaces
@@ -194,7 +203,12 @@ async fn main() -> Result<()> {
 
     // Execute command
     match cli.command {
-        Commands::Capture { set_monitor } => handle_capture(config, set_monitor).await,
+        Commands::Capture { set_monitor, no_gps } => {
+            if no_gps {
+                config.gps.enabled = false;
+            }
+            handle_capture(config, set_monitor).await
+        }
         Commands::Analyze { last_hours, output } => handle_analyze(config, last_hours, output),
         Commands::Report {
             output,
@@ -207,7 +221,12 @@ async fn main() -> Result<()> {
         Commands::Stats => handle_stats(config),
         Commands::Init => unreachable!(),
         Commands::Db { action } => handle_db(config, action),
-        Commands::Tui { set_monitor } => tui::run_tui(config, set_monitor).await,
+        Commands::Tui { set_monitor, no_gps } => {
+            if no_gps {
+                config.gps.enabled = false;
+            }
+            tui::run_tui(config, set_monitor).await
+        }
         Commands::Scan => handle_scan(),
         Commands::Calibrate {
             distance,
@@ -461,26 +480,30 @@ fn extract_signal_for_calibration(data: &[u8]) -> Option<i32> {
 }
 
 async fn handle_capture(mut config: Config, set_monitor: bool) -> Result<()> {
-    // Try to auto-detect monitor interface if configured one isn't in monitor mode
-    let interface = if set_monitor {
-        set_monitor_mode(&config.capture.interface)?;
-        config.capture.interface.clone()
-    } else if is_monitor_mode(&config.capture.interface)? {
-        config.capture.interface.clone()
-    } else if let Some(found) = find_monitor_interface()? {
-        info!("Auto-detected monitor interface: {}", found);
-        config.capture.interface = found.clone();
-        found
-    } else {
-        error!(
-            "Interface {} is not in monitor mode and no monitor interface found.",
-            config.capture.interface
-        );
-        error!("Use --set-monitor or run 'prowl scan' to find interfaces.");
-        return Ok(());
+    // Perform startup validation (GPS + monitor mode)
+    let validation = match validate_startup(&config, set_monitor) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("{}", e);
+            std::process::exit(1);
+        }
     };
 
-    info!("Using interface: {}", interface);
+    // Update config with resolved interface
+    config.capture.interface = validation.interface.clone();
+    info!("Using interface: {}", validation.interface);
+
+    // Log GPS status
+    match validation.gps_available {
+        Some(true) => info!("GPS enabled and available"),
+        Some(false) => {
+            warn!(
+                "GPS enabled but unavailable: {}",
+                validation.gps_error.as_deref().unwrap_or("unknown error")
+            );
+        }
+        None => info!("GPS disabled"),
+    }
 
     // Open database
     let db = Database::open(&config.capture.database).context("Failed to open database")?;

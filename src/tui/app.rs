@@ -5,6 +5,7 @@ use crate::distance::{
 use crate::parser::ProbeCapabilities;
 use crate::tui::TuiEvent;
 use std::collections::VecDeque;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 /// Maximum entries in the probe log ring buffer
@@ -103,6 +104,11 @@ pub struct App {
     /// GPS status
     pub gps_position: Option<(f64, f64)>,
     pub gps_connected: bool,
+    pub gps_enabled: bool,
+    /// GPS initialization error (if GPS failed to start)
+    pub gps_error: Option<String>,
+    /// Last time GPS position was updated (for activity indicator)
+    pub last_gps_update: Option<Instant>,
 
     /// Current channel
     pub current_channel: Option<u8>,
@@ -130,7 +136,12 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(event_rx: mpsc::Receiver<TuiEvent>, initial_stats: Stats) -> Self {
+    pub fn new(
+        event_rx: mpsc::Receiver<TuiEvent>,
+        initial_stats: Stats,
+        gps_enabled: bool,
+        gps_error: Option<String>,
+    ) -> Self {
         App {
             running: true,
             active_panel: ActivePanel::ProbeLog,
@@ -144,6 +155,9 @@ impl App {
             stats: initial_stats,
             gps_position: None,
             gps_connected: false,
+            gps_enabled,
+            gps_error,
+            last_gps_update: None,
             current_channel: None,
             capture_active: false,
             show_help: false,
@@ -259,6 +273,7 @@ impl App {
             TuiEvent::GpsUpdate(lat, lon) => {
                 self.gps_position = Some((lat, lon));
                 self.gps_connected = true;
+                self.last_gps_update = Some(Instant::now());
             }
             TuiEvent::GpsDisconnected => {
                 self.gps_connected = false;

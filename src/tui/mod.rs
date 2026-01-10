@@ -3,7 +3,8 @@ pub mod event;
 pub mod ui;
 pub mod widgets;
 
-use crate::channels::{find_monitor_interface, is_monitor_mode, set_monitor_mode, ChannelHopper};
+use crate::channels::ChannelHopper;
+use crate::validation::validate_startup;
 use crate::config::Config;
 use crate::database::{Database, ProbeCapture};
 use crate::distance::estimate_distance;
@@ -21,7 +22,7 @@ use pcap::Capture;
 use ratatui::prelude::*;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
@@ -64,24 +65,21 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Re
 
 /// Run the TUI application
 pub async fn run_tui(mut config: Config, set_monitor: bool) -> Result<()> {
-    // Try to auto-detect monitor interface if configured one isn't in monitor mode
-    let _interface = if set_monitor {
-        set_monitor_mode(&config.capture.interface)?;
-        config.capture.interface.clone()
-    } else if is_monitor_mode(&config.capture.interface)? {
-        config.capture.interface.clone()
-    } else if let Some(found) = find_monitor_interface()? {
-        eprintln!("Auto-detected monitor interface: {}", found);
-        config.capture.interface = found.clone();
-        found
-    } else {
-        eprintln!(
-            "Interface {} is not in monitor mode and no monitor interface found.",
-            config.capture.interface
-        );
-        eprintln!("Use --set-monitor or run 'prowl scan' to find interfaces.");
-        return Ok(());
+    // Perform startup validation (GPS + monitor mode)
+    let validation = match validate_startup(&config, set_monitor) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Startup validation failed:\n{}", e);
+            return Ok(());
+        }
     };
+
+    // Update config with resolved interface
+    config.capture.interface = validation.interface;
+
+    // Track GPS status from validation
+    let gps_available = validation.gps_available.unwrap_or(false);
+    let gps_error = validation.gps_error;
 
     // Disable logging to prevent interference with TUI display
     log::set_max_level(LevelFilter::Off);
@@ -106,6 +104,9 @@ pub async fn run_tui(mut config: Config, set_monitor: bool) -> Result<()> {
     // Create running flag
     let running = Arc::new(AtomicBool::new(true));
 
+    // Create shared GPS position for capture task
+    let shared_gps_position: Arc<RwLock<Option<(f64, f64)>>> = Arc::new(RwLock::new(None));
+
     // Setup panic hook to restore terminal
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {
@@ -120,6 +121,7 @@ pub async fn run_tui(mut config: Config, set_monitor: bool) -> Result<()> {
     let capture_config = config.clone();
     let capture_db = Database::open(&config.capture.database)?;
     let capture_ignore = ignore_lists.clone();
+    let capture_gps_position = shared_gps_position.clone();
 
     let capture_handle = tokio::spawn(async move {
         run_capture_loop(
@@ -128,16 +130,18 @@ pub async fn run_tui(mut config: Config, set_monitor: bool) -> Result<()> {
             capture_ignore,
             capture_running,
             capture_tx,
+            capture_gps_position,
         )
         .await
     });
 
-    // Spawn GPS task if enabled
-    if config.gps.enabled {
+    // Spawn GPS task if enabled and available
+    if config.gps.enabled && gps_available {
         let gps_tx = event_tx.clone();
         let gps_running = running.clone();
         let gps_host = config.gps.host.clone();
         let gps_port = config.gps.port;
+        let gps_shared_position = shared_gps_position.clone();
 
         tokio::spawn(async move {
             let gps_client = GpsClient::new(gps_host, gps_port);
@@ -151,6 +155,10 @@ pub async fn run_tui(mut config: Config, set_monitor: bool) -> Result<()> {
             while gps_running.load(Ordering::SeqCst) {
                 tokio::select! {
                     Some((lat, lon)) = pos_rx.recv() => {
+                        // Update shared GPS position for capture task
+                        if let Ok(mut pos) = gps_shared_position.write() {
+                            *pos = Some((lat, lon));
+                        }
                         let _ = gps_tx.send(TuiEvent::GpsUpdate(lat, lon)).await;
                     }
                     _ = tokio::time::sleep(Duration::from_secs(5)) => {
@@ -198,7 +206,7 @@ pub async fn run_tui(mut config: Config, set_monitor: bool) -> Result<()> {
     });
 
     // Create app
-    let mut app = App::new(event_rx, initial_stats);
+    let mut app = App::new(event_rx, initial_stats, config.gps.enabled, gps_error);
 
     // Setup terminal
     let mut terminal = setup_terminal()?;
@@ -303,6 +311,7 @@ async fn run_capture_loop(
     ignore_lists: IgnoreLists,
     running: Arc<AtomicBool>,
     event_tx: mpsc::Sender<TuiEvent>,
+    shared_gps_position: Arc<RwLock<Option<(f64, f64)>>>,
 ) -> Result<()> {
     let interface = &config.capture.interface;
 
@@ -383,13 +392,21 @@ async fn run_capture_loop(
                         None
                     };
 
+                    // Get current GPS position for this capture
+                    let (lat, lon) = shared_gps_position
+                        .read()
+                        .ok()
+                        .and_then(|pos| *pos)
+                        .map(|(lat, lon)| (Some(lat), Some(lon)))
+                        .unwrap_or((None, None));
+
                     // Insert into database
                     let capture = ProbeCapture {
                         mac: probe.source_mac.clone(),
                         ssid: probe.ssid.clone(),
                         timestamp: now,
-                        lat: None,
-                        lon: None,
+                        lat,
+                        lon,
                         signal_dbm: probe.signal_dbm,
                         channel: None,
                         distance_m,

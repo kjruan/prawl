@@ -6,6 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
+use std::time::Duration;
 
 /// Render the status bar at the bottom
 pub fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
@@ -13,14 +14,27 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
 
-    // GPS status
+    // GPS status with activity indicator
     let gps_status = if let Some((lat, lon)) = app.gps_position {
+        // Check if GPS has been updated recently (within 3 seconds)
+        let is_fresh = app
+            .last_gps_update
+            .map(|t| t.elapsed() < Duration::from_secs(3))
+            .unwrap_or(false);
+
+        let indicator = if is_fresh { "*" } else { " " };
         Span::styled(
-            format!("GPS: {:.4}, {:.4}", lat, lon),
+            format!("GPS:{} {:.4}, {:.4}", indicator, lat, lon),
             Style::default().fg(Color::Green),
         )
-    } else if app.gps_connected {
-        Span::styled("GPS: Connecting...", Style::default().fg(Color::Yellow))
+    } else if app.gps_error.is_some() {
+        // GPS was enabled but failed to initialize
+        Span::styled(
+            "GPS: Error",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )
+    } else if app.gps_enabled {
+        Span::styled("GPS: Waiting for fix...", Style::default().fg(Color::Yellow))
     } else {
         Span::styled("GPS: Disabled", Style::default().fg(Color::DarkGray))
     };
